@@ -1,0 +1,361 @@
+package com.reqium;
+
+import com.reqium.client.font.FontManager;
+import com.reqium.modules.client.HUD;
+import com.reqium.modules.client.SpotifyPlay;
+import com.reqium.modules.misc.NameTags;
+import com.reqium.utils.RenderUtils;
+import com.reqium.utils.SpotifyProvider;
+import com.reqium.gui.screens.ClickGuiScreen;
+import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.api.EnvType;
+import net.fabricmc.api.Environment;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.DrawContext;
+import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.client.network.PlayerListEntry;
+import net.minecraft.client.option.KeyBinding;
+import net.minecraft.client.render.Camera;
+import net.minecraft.client.util.InputUtil;
+import net.minecraft.client.texture.NativeImage;
+import net.minecraft.client.texture.NativeImageBackedTexture;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.ItemEntity;
+import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.item.ItemStack;
+import net.minecraft.text.Text;
+import net.minecraft.util.Identifier;
+import net.minecraft.util.math.Vec3d;
+import org.joml.Matrix4f;
+import org.joml.Quaternionf;
+import org.joml.Vector4f;
+import org.lwjgl.glfw.GLFW;
+
+import java.io.FileInputStream;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+
+@Environment(EnvType.CLIENT)
+public class ReqiumClientEvents implements ClientModInitializer {
+
+    private static int brandingX = -1, brandingY = -1;
+    private static int sessionX  = -1, sessionY  = -1;
+    private static int modulesX  = -1, modulesY  = -1;
+    private static int coordsX   = -1, coordsY   = -1;
+
+    private static long sessionStartTime = -1L;
+
+    private static final int GLASS      = 0xDD141414;
+    private static final int GLASS_SOFT = 0xFF1E1E1E;
+    private static final int OUTLINE    = 0xFF2B2B2B;
+    private static final int TEXT       = 0xFFF7FAFF;
+
+    private static Identifier spotifyArtTextureId;
+    private static NativeImageBackedTexture spotifyArtTexture;
+    private static String loadedSpotifyArtPath = "";
+
+
+    public static int getBrandingX() { return brandingX; }
+    public static int getBrandingY() { return brandingY; }
+    public static void setBranding(int x, int y) { brandingX = x; brandingY = y; }
+
+    public static int getSessionX() { return sessionX; }
+    public static int getSessionY() { return sessionY; }
+    public static void setSession(int x, int y) { sessionX = x; sessionY = y; }
+
+    public static int getModulesX() { return modulesX; }
+    public static int getModulesY() { return modulesY; }
+    public static void setModules(int x, int y) { modulesX = x; modulesY = y; }
+
+    public static int getCoordsX() { return coordsX; }
+    public static int getCoordsY() { return coordsY; }
+    public static void setCoords(int x, int y) { coordsX = x; coordsY = y; }
+
+    private static final KeyBinding OPEN_GUI_KEY = KeyBindingHelper.registerKeyBinding(
+            new KeyBinding("key.reqiumv1.open_gui", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_RIGHT_SHIFT, "key.categories.misc"));
+
+    private final boolean[] keyStates = new boolean[GLFW.GLFW_KEY_LAST + 1];
+
+    @Override
+    public void onInitializeClient() {
+        ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            while (OPEN_GUI_KEY.wasPressed()) {
+                if (!(client.currentScreen instanceof com.reqium.gui.screens.ClickGuiScreen)) {
+                    client.setScreen(com.reqium.gui.screens.ClickGuiScreen.getInstance());
+                }
+            }
+
+            for (Module m : ModuleManager.getInstance().getModules()) {
+                if (m.isEnabled()) m.onTick();
+            }
+
+            if (client.currentScreen == null) {
+                for (Module m : ModuleManager.getInstance().getModules()) {
+                    if ("HUD".equals(m.getName()) || "Colour Options".equals(m.getName())) continue;
+                    int key = m.getKeybind();
+                    if (key > 0 && key < keyStates.length) {
+                        boolean isDown = InputUtil.isKeyPressed(client.getWindow().getHandle(), key);
+                        if (isDown && !keyStates[key]) m.setEnabled(!m.isEnabled());
+                        keyStates[key] = isDown;
+                    }
+                }
+            }
+        });
+
+        HudRenderCallback.EVENT.register((context, tickCounter) -> {
+            Module hudModule = ModuleManager.getInstance().getModule("HUD");
+            if (hudModule != null && hudModule.isEnabled()) {
+                drawHud(context);
+            }
+            MinecraftClient renderClient = MinecraftClient.getInstance();
+            drawSpotifyPanel(context, renderClient, context.getScaledWindowWidth(), context.getScaledWindowHeight());
+            drawNameTags(context);
+        });
+    }
+
+    public static void renderHudPreview(DrawContext context) {
+        drawHud(context);
+    }
+
+    private static void drawHud(DrawContext context) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        ClientPlayerEntity player = client.player;
+        if (player == null) return;
+        if (sessionStartTime < 0L) sessionStartTime = System.currentTimeMillis();
+
+        int screenW = context.getScaledWindowWidth();
+        int screenH = context.getScaledWindowHeight();
+        ensureHudDefaults(client, player, screenW, screenH);
+
+        if (HUD.SHOW_BRANDING.getValue())       drawBranding(context, client, player);
+        if (HUD.SHOW_SESSION.getValue())        drawSession(context, client);
+        if (HUD.SHOW_ACTIVE_MODULES.getValue()) drawActiveModules(context, client, screenW);
+        if (HUD.SHOW_PLAYER_PANEL.getValue())   drawPlayerPanel(context, client, player, screenH);
+    }
+
+    private static void drawBranding(DrawContext context, MinecraftClient client, ClientPlayerEntity player) {
+        int x = brandingX < 0 ? 4 : brandingX;
+        int y = brandingY < 0 ? 4 : brandingY;
+        String name = com.reqium.gui.screens.ClickGuiScreen.getDisplayName();
+        int w = Math.max(116, client.textRenderer.getWidth(name) + 20);
+        drawGlassCard(context, x, y, w, 20, 9);
+        context.drawTextWithShadow(client.textRenderer, name, x + 10, y + 6, getAccent());
+    }
+
+    private static void drawSession(DrawContext context, MinecraftClient client) {
+        String time = getSessionText();
+        int textW = client.textRenderer.getWidth(time);
+        int w = Math.max(104, textW + 22);
+        int x = sessionX < 0 ? 4 : sessionX;
+        int y = sessionY < 0 ? 28 : sessionY;
+        drawGlassCard(context, x, y, w, 20, 10);
+        context.drawTextWithShadow(client.textRenderer, time, x + 11, y + 6, getAccent());
+    }
+
+    private static void drawActiveModules(DrawContext context, MinecraftClient client, int screenW) {
+        List<Module> active = ModuleManager.getInstance().getModules().stream()
+                .filter(Module::isEnabled)
+                .filter(m -> !"HUD".equals(m.getName()))
+                .filter(m -> !"Render".equalsIgnoreCase(m.getCategory()) && !"Client".equalsIgnoreCase(m.getCategory()))
+                .sorted(Comparator.comparingInt((Module m) -> client.textRenderer.getWidth(m.getName())).reversed())
+                .collect(Collectors.toList());
+
+        int y = modulesY < 0 ? 4 : modulesY;
+        int xBase = modulesX < 0 ? defaultModulesX(client, screenW) : modulesX;
+        for (Module mod : active) {
+            String label = mod.getName();
+            int textW = client.textRenderer.getWidth(label);
+            drawGlassCard(context, xBase, y, textW + 20, 18, 9);
+            RenderUtils.drawRoundedRect(context, xBase + 4, y + 4, 3, 10, 1, getAccent());
+            FontManager.getInstance().drawWithShadow(context, client.textRenderer, label, xBase + 11, y + 5, getAccent());
+            y += 22;
+        }
+    }
+
+    private static void drawPlayerPanel(DrawContext context, MinecraftClient client, ClientPlayerEntity player, int screenH) {
+        String line = String.format("X:%d Y:%d Z:%d", (int) player.getX(), (int) player.getY(), (int) player.getZ());
+        int w = Math.max(144, client.textRenderer.getWidth(line) + 20);
+        int x = coordsX < 0 ? 4 : coordsX;
+        int y = coordsY < 0 ? Math.max(0, screenH - 24) : coordsY;
+        drawGlassCard(context, x, y, w, 20, 9);
+        context.drawTextWithShadow(client.textRenderer, line, x + 10, y + 6, getAccent());
+    }
+
+    private static void drawNameTags(DrawContext context) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player == null || client.world == null || !client.player.isSneaking()) return;
+        Module module = ModuleManager.getInstance().getModule("NameTags");
+        if (!(module instanceof NameTags nameTags) || !module.isEnabled()) return;
+
+        Camera camera = client.gameRenderer.getCamera();
+        List<Entity> entities = new ArrayList<>();
+        for (Entity entity : client.world.getEntities()) {
+            if (entity == client.player || !entity.isAlive()) continue;
+            if (!(entity instanceof PlayerEntity) && !(entity instanceof ItemEntity)) continue;
+            if (client.player.distanceTo(entity) > nameTags.range.getValue()) continue;
+            entities.add(entity);
+        }
+        entities.sort(Comparator.comparingDouble(client.player::distanceTo));
+
+        for (Entity entity : entities) {
+            Vec3d pos = entity.getPos().add(0, entity.getHeight() + 0.4, 0);
+            ScreenPoint point = worldToScreen(client, camera, pos);
+            if (point == null) continue;
+            drawTagCard(context, client, entity, point, nameTags);
+        }
+    }
+
+    private static void drawTagCard(DrawContext context, MinecraftClient client, Entity entity, ScreenPoint point, NameTags nameTags) {
+        List<String> parts = new ArrayList<>();
+        if (nameTags.name.getValue()) {
+            if (entity instanceof ItemEntity itemEntity) {
+                ItemStack stack = itemEntity.getStack();
+                parts.add(stack.getName().getString());
+            } else {
+                parts.add(entity.getDisplayName().getString());
+            }
+        }
+        if (nameTags.quantity.getValue() && entity instanceof ItemEntity itemEntity) {
+            parts.add("x" + itemEntity.getStack().getCount());
+        }
+        if (nameTags.ping.getValue() && entity instanceof PlayerEntity playerEntity && client.getNetworkHandler() != null) {
+            PlayerListEntry entry = client.getNetworkHandler().getPlayerListEntry(playerEntity.getUuid());
+            if (entry != null) parts.add(entry.getLatency() + "ms");
+        }
+        if (nameTags.fps.getValue()) {
+            parts.add(client.getCurrentFps() + "fps");
+        }
+        if (nameTags.rangeText.getValue()) {
+            parts.add((int) client.player.distanceTo(entity) + "m");
+        }
+        if (parts.isEmpty()) return;
+
+        String text = String.join(" ", parts);
+        float scale = (float) nameTags.size.getValue().doubleValue();
+        int textW = client.textRenderer.getWidth(text);
+        int cardW = Math.max(42, (int) (textW * scale) + 16);
+        int cardH = Math.max(18, (int) (12 * scale) + 10);
+        int x = (int) point.x - cardW / 2;
+        int y = (int) point.y - cardH;
+
+        RenderUtils.drawRoundedRect(context, x, y, cardW, cardH, 8, 0xEE000000);
+        RenderUtils.drawRoundedRect(context, x + 1, y + 1, cardW - 2, cardH - 2, 7, 0xD8101010);
+        RenderUtils.drawRoundedRectOutline(context, x, y, cardW, cardH, 8, withAlpha(getAccent(), 0x56));
+        context.getMatrices().push();
+        context.getMatrices().translate(x + 8, y + 5, 0);
+        context.getMatrices().scale(scale, scale, 1f);
+        FontManager.getInstance().drawWithShadow(context, client.textRenderer, text, 0, 0, 0xFFFFFFFF);
+        context.getMatrices().pop();
+    }
+
+    private static String getSessionText() {
+        long elapsed = Math.max(0L, System.currentTimeMillis() - sessionStartTime);
+        long hours = TimeUnit.MILLISECONDS.toHours(elapsed);
+        long minutes = TimeUnit.MILLISECONDS.toMinutes(elapsed) % 60;
+        long seconds = TimeUnit.MILLISECONDS.toSeconds(elapsed) % 60;
+        return String.format("Session %02d:%02d:%02d", hours, minutes, seconds);
+    }
+
+    private static void ensureHudDefaults(MinecraftClient client, ClientPlayerEntity player, int screenW, int screenH) {
+        if (brandingX < 0 || brandingY < 0) setBranding(4, 4);
+        if (sessionX < 0 || sessionY < 0) setSession(4, 28);
+        if (modulesX < 0 || modulesY < 0) setModules(defaultModulesX(client, screenW), 4);
+        if (coordsX < 0 || coordsY < 0) setCoords(4, Math.max(0, screenH - 24));
+    }
+
+    private static int defaultModulesX(MinecraftClient client, int screenW) {
+        int maxWidth = 96;
+        for (Module module : ModuleManager.getInstance().getModules()) {
+            if (!module.isEnabled() || "HUD".equals(module.getName())) continue;
+            if ("Render".equalsIgnoreCase(module.getCategory()) || "Client".equalsIgnoreCase(module.getCategory())) continue;
+            maxWidth = Math.max(maxWidth, client.textRenderer.getWidth(module.getName()) + 20);
+        }
+        return Math.max(4, screenW - maxWidth - 8);
+    }
+
+    private static int getAccent() {
+        return ClickGuiScreen.getAccentColor();
+    }
+
+    private static void drawGlassCard(DrawContext context, int x, int y, int w, int h, int radius) {
+        RenderUtils.drawRoundedRect(context, x, y, w, h, radius, GLASS);
+        RenderUtils.drawRoundedRect(context, x + 1, y + 1, w - 2, h - 2, Math.max(4, radius - 1), GLASS_SOFT);
+        RenderUtils.drawRoundedRectOutline(context, x, y, w, h, radius, OUTLINE);
+    }
+
+    private static int withAlpha(int color, int alpha) {
+        return (alpha << 24) | (color & 0x00FFFFFF);
+    }
+
+    private static void drawSpotifyPanel(DrawContext context, MinecraftClient client, int screenW, int screenH) {
+        Module module = ModuleManager.getInstance().getModule("SpotifyPlay");
+        if (!(module instanceof SpotifyPlay spotify) || !module.isEnabled()) return;
+        SpotifyProvider.TrackInfo info = SpotifyProvider.fetchNowPlaying();
+        if (info == null || info.title() == null || info.title().isBlank()) return;
+
+        int panelW = 188;
+        int panelH = 60;
+        int x = screenW - panelW - 6;
+        int y = screenH - panelH - 6;
+        drawGlassCard(context, x, y, panelW, panelH, 12);
+
+        int artSize = 44;
+        int artX = x + 8;
+        int artY = y + 8;
+        drawSpotifyArt(context, client, info.artPath(), artX, artY, artSize, artSize);
+
+        context.drawTextWithShadow(client.textRenderer, info.title(), x + 58, y + 12, TEXT);
+        context.drawTextWithShadow(client.textRenderer, info.artist(), x + 58, y + 26, 0xFFD4D8E0);
+        context.drawTextWithShadow(client.textRenderer, info.state(), x + 58, y + 40, getAccent());
+    }
+
+    private static void drawSpotifyArt(DrawContext context, MinecraftClient client, String artPath, int x, int y, int w, int h) {
+        if (artPath == null || artPath.isBlank()) {
+            RenderUtils.drawRoundedRect(context, x, y, w, h, 10, 0xFF22252C);
+            return;
+        }
+        try {
+            if (!artPath.equals(loadedSpotifyArtPath)) {
+                if (spotifyArtTexture != null) {
+                    client.getTextureManager().destroyTexture(spotifyArtTextureId);
+                    spotifyArtTexture.close();
+                }
+                NativeImage image = NativeImage.read(new FileInputStream(artPath));
+                spotifyArtTexture = new NativeImageBackedTexture(image);
+                spotifyArtTextureId = Identifier.of("reqiumv1", "spotify_art");
+                client.getTextureManager().registerTexture(spotifyArtTextureId, spotifyArtTexture);
+                loadedSpotifyArtPath = artPath;
+            }
+            if (spotifyArtTextureId != null) {
+                context.drawTexture(spotifyArtTextureId, x, y, 0, 0, w, h, w, h);
+            }
+        } catch (Exception e) {
+            RenderUtils.drawRoundedRect(context, x, y, w, h, 10, 0xFF22252C);
+        }
+    }
+
+    private static ScreenPoint worldToScreen(MinecraftClient client, Camera camera, Vec3d pos) {
+        Vec3d cameraPos = camera.getPos();
+        Vec3d translated = pos.subtract(cameraPos);
+        Quaternionf rotation = new Quaternionf(camera.getRotation()).conjugate();
+        Vector4f vec = new Vector4f((float) translated.x, (float) translated.y, (float) translated.z, 1f);
+        vec.rotate(rotation);
+        Matrix4f projection = client.gameRenderer.getBasicProjectionMatrix(client.getRenderTickCounter().getTickDelta(false));
+        vec.mul(projection);
+        if (vec.w <= 0.1f) return null;
+        float ndcX = vec.x / vec.w;
+        float ndcY = vec.y / vec.w;
+        float x = (ndcX * 0.5f + 0.5f) * client.getWindow().getScaledWidth();
+        float y = (1f - (ndcY * 0.5f + 0.5f)) * client.getWindow().getScaledHeight();
+        if (x < 0 || y < 0 || x > client.getWindow().getScaledWidth() || y > client.getWindow().getScaledHeight()) return null;
+        return new ScreenPoint(x, y);
+    }
+
+    private record ScreenPoint(float x, float y) {}
+}

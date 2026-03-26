@@ -1,0 +1,5 @@
+accessWidener v2 named
+
+accessible field net/minecraft/client/MinecraftClient currentScreen Lnet/minecraft/client/gui/screen/Screen;
+accessible method net/minecraft/client/gui/DrawContext fill (IIIII)V
+

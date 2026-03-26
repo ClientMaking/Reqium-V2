@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "reqiumv1",
+  "version": "${version}",
+  "name": "Reqium V1",
+  "description": "A clean, modern Minecraft PvP client",
+  "authors": [
+    "ReqiumDev"
+  ],
+  "contact": {
+    "homepage": "https://discord.gg/reqium"
+  },
+  "license": "MIT",
+  "icon": "assets/reqiumv1/icon.png",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "com.reqium.ReqiumClient",
+      "com.reqium.ReqiumClientEvents"
+    ]
+  },
+  "mixins": [
+    "reqiumv1.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=${fabric_loader_version}",
+    "minecraft": "${minecraft_version}",
+    "java": ">=21"
+  }
+}
